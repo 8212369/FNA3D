@@ -73,6 +73,17 @@ typedef struct VulkanExtensions
 	uint8_t GGP_frame_token;
 } VulkanExtensions;
 
+
+typedef struct VulkanFeatures {
+	/* These features are optional! */
+
+	/* Many mobile GPU does not implement this. Let's just hope they don't use much of this! */
+	uint8_t occlusionQueryPrecise;
+	uint8_t fillModeNonSolid;
+	uint8_t samplerAnisotropy;
+	uint8_t swapChainSupportOpaqueAlphaComposite;
+} VulkanFeatures;
+
 static inline uint8_t CheckDeviceExtensions(
 	VkExtensionProperties *extensions,
 	uint32_t numExtensions,
@@ -510,6 +521,7 @@ typedef struct SwapChainSupportDetails
 	uint32_t formatsLength;
 	VkPresentModeKHR *presentModes;
 	uint32_t presentModesLength;
+	uint8_t opaqueAlphaCompositeSupport;
 } SwapChainSupportDetails;
 
 /* FIXME: This could be packed better */
@@ -1412,6 +1424,7 @@ typedef struct VulkanRenderer
 	uint8_t supportsSRGBRenderTarget;
 	uint8_t debugMode;
 	VulkanExtensions supports;
+	VulkanFeatures featureSupports;
 
 	uint8_t submitCounter; /* used so we don't clobber data being used by GPU */
 
@@ -1979,6 +1992,37 @@ static uint8_t VULKAN_INTERNAL_CheckDeviceExtensions(
 	return allExtensionsSupported;
 }
 
+static uint8_t VULKAN_INTERNAL_CheckDeviceFeatures(
+	VulkanRenderer *renderer,
+	VkPhysicalDevice physicalDevice,
+	VulkanFeatures *physicalDeviceFeatures
+) {
+	VkPhysicalDeviceFeatures features;
+
+	renderer->vkGetPhysicalDeviceFeatures(
+		physicalDevice,
+		&features
+	);
+
+	if (!features.occlusionQueryPrecise) {
+		FNA3D_LogWarn("Precise occlusion query is not supported! Expect graphics glitches.");
+	}
+	
+	if (!features.samplerAnisotropy) {
+		FNA3D_LogWarn("Sampler anisotropy is not supported! Expect graphics glitches.");
+	}
+	
+	if (!features.fillModeNonSolid) {
+		FNA3D_LogWarn("Non-solid fill mode is unsupported! Expect graphics glitches.");
+	}
+	
+	physicalDeviceFeatures->occlusionQueryPrecise = features.occlusionQueryPrecise;
+	physicalDeviceFeatures->fillModeNonSolid = features.fillModeNonSolid;
+	physicalDeviceFeatures->samplerAnisotropy = features.samplerAnisotropy;
+	
+	return 1;
+}
+
 /* Vulkan: Validation Layers */
 
 static uint8_t VULKAN_INTERNAL_CheckValidationLayers(
@@ -2058,6 +2102,9 @@ static uint8_t VULKAN_INTERNAL_QuerySwapChainSupport(
 	if (!(outputDetails->capabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR))
 	{
 		FNA3D_LogWarn("Opaque presentation unsupported! Expect weird transparency bugs!");
+		outputDetails->opaqueAlphaCompositeSupport = 0;
+	} else {
+		outputDetails->opaqueAlphaCompositeSupport = 1;
 	}
 
 	result = renderer->vkGetPhysicalDeviceSurfaceFormatsKHR(
@@ -2259,6 +2306,7 @@ static uint8_t VULKAN_INTERNAL_IsDeviceSuitable(
 	VulkanRenderer *renderer,
 	VkPhysicalDevice physicalDevice,
 	VulkanExtensions *physicalDeviceExtensions,
+	VulkanFeatures *physicalDeviceFeatures,
 	VkSurfaceKHR surface,
 	uint32_t *queueFamilyIndex,
 	uint8_t *deviceRank
@@ -2301,6 +2349,14 @@ static uint8_t VULKAN_INTERNAL_IsDeviceSuitable(
 		renderer,
 		physicalDevice,
 		physicalDeviceExtensions
+	)) {
+		return 0;
+	}
+	
+	if (!VULKAN_INTERNAL_CheckDeviceFeatures(
+		renderer,
+		physicalDevice,
+		physicalDeviceFeatures
 	)) {
 		return 0;
 	}
@@ -2401,6 +2457,9 @@ static uint8_t VULKAN_INTERNAL_IsDeviceSuitable(
 		surface,
 		&swapchainSupportDetails
 	);
+	
+	physicalDeviceFeatures->swapChainSupportOpaqueAlphaComposite = swapchainSupportDetails.opaqueAlphaCompositeSupport;
+	
 	if (swapchainSupportDetails.formatsLength > 0)
 	{
 		SDL_free(swapchainSupportDetails.formats);
@@ -2599,6 +2658,7 @@ static uint8_t VULKAN_INTERNAL_DeterminePhysicalDevice(VulkanRenderer *renderer,
 	VkResult vulkanResult;
 	VkPhysicalDevice *physicalDevices;
 	VulkanExtensions *physicalDeviceExtensions;
+	VulkanFeatures *physicalDeviceFeatures;
 	uint32_t physicalDeviceCount, i, suitableIndex;
 	uint32_t queueFamilyIndex, suitableQueueFamilyIndex;
 	VkDeviceSize deviceLocalHeapSize;
@@ -2621,6 +2681,7 @@ static uint8_t VULKAN_INTERNAL_DeterminePhysicalDevice(VulkanRenderer *renderer,
 
 	physicalDevices = SDL_stack_alloc(VkPhysicalDevice, physicalDeviceCount);
 	physicalDeviceExtensions = SDL_stack_alloc(VulkanExtensions, physicalDeviceCount);
+	physicalDeviceFeatures = SDL_stack_alloc(VulkanFeatures, physicalDeviceCount);
 
 	vulkanResult = renderer->vkEnumeratePhysicalDevices(
 		renderer->instance,
@@ -2660,6 +2721,7 @@ static uint8_t VULKAN_INTERNAL_DeterminePhysicalDevice(VulkanRenderer *renderer,
 			renderer,
 			physicalDevices[i],
 			&physicalDeviceExtensions[i],
+			&physicalDeviceFeatures[i],
 			surface,
 			&queueFamilyIndex,
 			&deviceRank
@@ -2690,6 +2752,7 @@ static uint8_t VULKAN_INTERNAL_DeterminePhysicalDevice(VulkanRenderer *renderer,
 	if (suitableIndex != -1)
 	{
 		renderer->supports = physicalDeviceExtensions[suitableIndex];
+		renderer->featureSupports = physicalDeviceFeatures[suitableIndex];
 		renderer->physicalDevice = physicalDevices[suitableIndex];
 		renderer->queueFamilyIndex = suitableQueueFamilyIndex;
 	}
@@ -2785,9 +2848,9 @@ static uint8_t VULKAN_INTERNAL_CreateLogicalDevice(VulkanRenderer *renderer)
 	/* specifying used device features */
 
 	SDL_zero(deviceFeatures);
-	deviceFeatures.occlusionQueryPrecise = VK_TRUE;
-	deviceFeatures.fillModeNonSolid = VK_TRUE;
-	deviceFeatures.samplerAnisotropy = VK_TRUE;
+	deviceFeatures.occlusionQueryPrecise = renderer->featureSupports.occlusionQueryPrecise;
+	deviceFeatures.fillModeNonSolid = renderer->featureSupports.fillModeNonSolid;
+	deviceFeatures.samplerAnisotropy = renderer->featureSupports.samplerAnisotropy;
 
 	/* Creating the logical device */
 
@@ -5280,6 +5343,9 @@ static void ShaderResources_Destroy(
 		}
 	}
 
+	renderer->vkFreeDescriptorSets(renderer->logicalDevice, renderer->uniformBufferDescriptorPool, 1,
+		&shaderResources->uniformDescriptorSet);
+
 	SDL_free(shaderResources->samplerDescriptorPools);
 	SDL_free(shaderResources->samplerBindingIndices);
 	SDL_free(shaderResources->inactiveDescriptorSets);
@@ -6315,8 +6381,7 @@ static void VULKAN_INTERNAL_SubmitCommands(
 		if (	!validSwapchainExists ||
 			acquireResult == VK_ERROR_OUT_OF_DATE_KHR ||
 			acquireResult == VK_SUBOPTIMAL_KHR ||
-			presentResult == VK_ERROR_OUT_OF_DATE_KHR ||
-			presentResult == VK_SUBOPTIMAL_KHR	)
+			presentResult == VK_ERROR_OUT_OF_DATE_KHR)
 		{
 			VULKAN_INTERNAL_RecreateSwapchain(renderer, windowHandle);
 		}
@@ -6630,8 +6695,11 @@ static CreateSwapchainResult VULKAN_INTERNAL_CreateSwapchain(
 	swapchainCreateInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	swapchainCreateInfo.queueFamilyIndexCount = 0;
 	swapchainCreateInfo.pQueueFamilyIndices = NULL;
+	// Game set and works with rotated framebuffer, so we must use identity here.
+	// Some lucky game will just not rotate at all, which saves the work for us ;)
 	swapchainCreateInfo.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-	swapchainCreateInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+	swapchainCreateInfo.compositeAlpha = (renderer->featureSupports.swapChainSupportOpaqueAlphaComposite) ? 
+		VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR : VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
 	swapchainCreateInfo.presentMode = swapchainData->presentMode;
 	swapchainCreateInfo.clipped = VK_TRUE;
 	swapchainCreateInfo.oldSwapchain = VK_NULL_HANDLE;
@@ -7384,6 +7452,8 @@ static void VULKAN_INTERNAL_GetTextureData(
 
 static void VULKAN_INTERNAL_SetViewportCommand(VulkanRenderer *renderer)
 {
+	SDL_LockMutex(renderer->passLock);
+
 	VkViewport vulkanViewport;
 
 	/* Flipping the viewport for compatibility with D3D */
@@ -7407,6 +7477,8 @@ static void VULKAN_INTERNAL_SetViewportCommand(VulkanRenderer *renderer)
 		1,
 		&vulkanViewport
 	));
+
+	SDL_UnlockMutex(renderer->passLock);
 }
 
 static void VULKAN_INTERNAL_SetScissorRectCommand(VulkanRenderer *renderer)
@@ -7414,6 +7486,8 @@ static void VULKAN_INTERNAL_SetScissorRectCommand(VulkanRenderer *renderer)
 	VkOffset2D offset;
 	VkExtent2D extent;
 	VkRect2D vulkanScissorRect;
+
+	SDL_LockMutex(renderer->passLock);
 
 	if (renderer->renderPassInProgress)
 	{
@@ -7441,11 +7515,15 @@ static void VULKAN_INTERNAL_SetScissorRectCommand(VulkanRenderer *renderer)
 			&vulkanScissorRect
 		));
 	}
+
+	SDL_UnlockMutex(renderer->passLock);
 }
 
 static void VULKAN_INTERNAL_SetStencilReferenceValueCommand(
 	VulkanRenderer *renderer
 ) {
+	SDL_LockMutex(renderer->passLock);
+
 	if (renderer->renderPassInProgress)
 	{
 		RECORD_CMD(renderer->vkCmdSetStencilReference(
@@ -7454,10 +7532,14 @@ static void VULKAN_INTERNAL_SetStencilReferenceValueCommand(
 			renderer->stencilRef
 		));
 	}
+
+	SDL_UnlockMutex(renderer->passLock);
 }
 
 static void VULKAN_INTERNAL_SetDepthBiasCommand(VulkanRenderer *renderer)
 {
+	SDL_LockMutex(renderer->passLock);
+
 	if (renderer->renderPassInProgress)
 	{
 		RECORD_CMD(renderer->vkCmdSetDepthBias(
@@ -7467,6 +7549,8 @@ static void VULKAN_INTERNAL_SetDepthBiasCommand(VulkanRenderer *renderer)
 			renderer->rasterizerState.slopeScaleDepthBias
 		));
 	}
+
+	SDL_UnlockMutex(renderer->passLock);
 }
 
 /* Vulkan: Pipeline State Objects */
@@ -8009,6 +8093,8 @@ static VkPipeline VULKAN_INTERNAL_FetchPipeline(VulkanRenderer *renderer)
 
 static void VULKAN_INTERNAL_BindPipeline(VulkanRenderer *renderer)
 {
+	SDL_LockMutex(renderer->passLock);
+
 	VkShaderModule vertShader, fragShader;
 	MOJOSHADER_vkGetShaderModules(renderer->mojoshaderContext, &vertShader, &fragShader);
 
@@ -8034,6 +8120,8 @@ static void VULKAN_INTERNAL_BindPipeline(VulkanRenderer *renderer)
 		renderer->currentVertShader = vertShader;
 		renderer->currentFragShader = fragShader;
 	}
+
+	SDL_UnlockMutex(renderer->passLock);
 }
 
 /* Vulkan: The Faux-Backbuffer */
@@ -8632,9 +8720,6 @@ static void VULKAN_INTERNAL_MaybeEndRenderPass(
 		renderer->drawCallMadeThisPass = 0;
 		renderer->currentPipeline = VK_NULL_HANDLE;
 		renderer->needNewPipeline = 1;
-
-		/* Unlocking long-term lock */
-		SDL_UnlockMutex(renderer->passLock);
 	}
 
 	SDL_UnlockMutex(renderer->passLock);
@@ -8808,6 +8893,8 @@ static void VULKAN_INTERNAL_BeginRenderPass(
 	renderer->shouldClearColorOnBeginPass = 0;
 	renderer->shouldClearDepthOnBeginPass = 0;
 	renderer->shouldClearStencilOnBeginPass = 0;
+
+	SDL_UnlockMutex(renderer->passLock);
 }
 
 static void VULKAN_INTERNAL_BeginRenderPassClear(
@@ -8819,6 +8906,8 @@ static void VULKAN_INTERNAL_BeginRenderPassClear(
 	uint8_t clearDepth,
 	uint8_t clearStencil
 ) {
+	SDL_LockMutex(renderer->passLock);
+
 	if (!clearColor && !clearDepth && !clearStencil)
 	{
 		return;
@@ -8856,6 +8945,7 @@ static void VULKAN_INTERNAL_BeginRenderPassClear(
 	}
 
 	renderer->needNewRenderPass = 1;
+	SDL_UnlockMutex(renderer->passLock);
 }
 
 static void VULKAN_INTERNAL_MidRenderPassClear(
@@ -8886,6 +8976,8 @@ static void VULKAN_INTERNAL_MidRenderPassClear(
 	{
 		return;
 	}
+
+	SDL_LockMutex(renderer->passLock);
 
 	attachmentCount = 0;
 
@@ -8956,6 +9048,8 @@ static void VULKAN_INTERNAL_MidRenderPassClear(
 		1,
 		&clearRect
 	));
+
+	SDL_UnlockMutex(renderer->passLock);
 }
 
 /* Vulkan: Sampler State */
@@ -8995,11 +9089,11 @@ static VkSampler VULKAN_INTERNAL_FetchSamplerState(
 		samplerState->addressW
 	];
 	createInfo.mipLodBias = samplerState->mipMapLevelOfDetailBias;
-	createInfo.anisotropyEnable = (samplerState->filter == FNA3D_TEXTUREFILTER_ANISOTROPIC);
-	createInfo.maxAnisotropy = SDL_min(
+	createInfo.anisotropyEnable = (renderer->featureSupports.samplerAnisotropy) && (samplerState->filter == FNA3D_TEXTUREFILTER_ANISOTROPIC);
+	createInfo.maxAnisotropy = renderer->featureSupports.samplerAnisotropy ? SDL_min(
 		(float) SDL_max(1, samplerState->maxAnisotropy),
 		renderer->physicalDeviceProperties.properties.limits.maxSamplerAnisotropy
-	);
+	) : 1.0f;
 	createInfo.compareEnable = 0;
 	createInfo.compareOp = 0;
 	createInfo.minLod = (float) samplerState->maxMipLevel;
@@ -9514,6 +9608,8 @@ static void VULKAN_DrawInstancedPrimitives(
 		renderer->needNewRenderPass = 1;
 	}
 
+	SDL_LockMutex(renderer->passLock);
+
 	VULKAN_INTERNAL_BeginRenderPass(renderer);
 	VULKAN_INTERNAL_BindPipeline(renderer);
 
@@ -9582,6 +9678,8 @@ static void VULKAN_DrawInstancedPrimitives(
 	));
 
 	renderer->drawCallMadeThisPass = 1;
+
+	SDL_UnlockMutex(renderer->passLock);
 }
 
 static void VULKAN_DrawIndexedPrimitives(
@@ -9626,6 +9724,9 @@ static void VULKAN_DrawPrimitives(
 		renderer->currentPrimitiveType = primitiveType;
 		renderer->needNewRenderPass = 1;
 	}
+
+	SDL_LockMutex(renderer->passLock);
+
 	VULKAN_INTERNAL_BeginRenderPass(renderer);
 	VULKAN_INTERNAL_BindPipeline(renderer);
 
@@ -9685,6 +9786,7 @@ static void VULKAN_DrawPrimitives(
 	));
 
 	renderer->drawCallMadeThisPass = 1;
+	SDL_UnlockMutex(renderer->passLock);
 }
 
 /* Mutable Render States */
@@ -9740,6 +9842,7 @@ static void VULKAN_SetBlendFactor(
 	FNA3D_Color *blendFactor
 ) {
 	VulkanRenderer *renderer = (VulkanRenderer*) driverData;
+
 	const float blendConstants[] =
 	{
 		blendFactor->r,
@@ -9747,6 +9850,8 @@ static void VULKAN_SetBlendFactor(
 		blendFactor->b,
 		blendFactor->a
 	};
+
+	SDL_LockMutex(renderer->passLock);
 
 	if (	blendFactor->r != renderer->blendState.blendFactor.r ||
 		blendFactor->g != renderer->blendState.blendFactor.g ||
@@ -9761,6 +9866,8 @@ static void VULKAN_SetBlendFactor(
 			blendConstants
 		));
 	}
+
+	SDL_UnlockMutex(renderer->passLock);
 }
 
 static int32_t VULKAN_GetMultiSampleMask(FNA3D_Renderer *driverData)
@@ -12823,7 +12930,7 @@ static FNA3D_Device* VULKAN_CreateDevice(
 
 	descriptorPoolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 	descriptorPoolInfo.pNext = NULL;
-	descriptorPoolInfo.flags = 0;
+	descriptorPoolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
 	descriptorPoolInfo.maxSets = MAX_UNIFORM_DESCRIPTOR_SETS;
 	descriptorPoolInfo.poolSizeCount = 1;
 	descriptorPoolInfo.pPoolSizes = &descriptorPoolSize;
